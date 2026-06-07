@@ -1,7 +1,10 @@
+export type Residency = 'EU' | 'US'
+
 export interface Organization {
   id: string
   name: string
   createdAt: string
+  residency?: Residency
 }
 
 export type OrgRole = 'owner' | 'admin' | 'member'

@@ -18,11 +18,15 @@ org-scoped endpoint must uphold.
    rejects callers whose role is not in the allowed set with
    `403 Forbidden: requires role <roles>`.
 
-4. **Data scoping** — every query inside a handler filters by the `orgId` from
+4. **Data residency** — organizations may be tagged with a residency label (`EU` or `US`).
+   When present, org-scoped authorization queries are routed to the matching read replica
+   via `READ_DATABASE_URL_EU` or `READ_DATABASE_URL_US`.
+
+5. **Data scoping** — every query inside a handler filters by the `orgId` from
    `req.params`. Client-supplied `orgId` values in query strings or request bodies are
    never trusted for data access decisions.
 
-5. **No cross-org leakage** — pagination, sorting, and filtering are applied *after* the
+6. **No cross-org leakage** — pagination, sorting, and filtering are applied *after* the
    org-scope filter. A filter that matches zero records in the target org returns an empty
    result set, not records from another org.
 

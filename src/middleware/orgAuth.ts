@@ -1,13 +1,74 @@
 import { Request, Response, NextFunction } from 'express'
 import { AuthenticatedRequest } from './auth.js'
+import knex, { Knex } from 'knex'
 import {
   getOrganization,
   getMemberRole as lookupMemberRole,
 } from '../models/organizations.js'
-import type { OrgRole } from '../models/organizations.js'
+import type { OrgRole, Residency } from '../models/organizations.js'
 import db from '../db/index.js'
 
-export type { OrgRole } from '../models/organizations.js'
+export type { OrgRole, Residency } from '../models/organizations.js'
+
+const RESIDENCY_URL_ENV: Record<Residency, keyof NodeJS.ProcessEnv> = {
+  EU: 'READ_DATABASE_URL_EU',
+  US: 'READ_DATABASE_URL_US',
+}
+
+const readDbCache = new Map<string, Knex>()
+
+export function getReadDatabaseUrl(residency?: Residency): string | undefined {
+  if (residency) {
+    const url = process.env[RESIDENCY_URL_ENV[residency]]
+    if (url && url.trim() !== '') {
+      return url
+    }
+  }
+  return process.env.DATABASE_URL
+}
+
+export function getResidencyReadDb(residency?: Residency): Knex {
+  const connectionString = getReadDatabaseUrl(residency)
+  if (!connectionString) {
+    return db
+  }
+
+  if (!readDbCache.has(connectionString)) {
+    readDbCache.set(
+      connectionString,
+      knex({
+        client: 'pg',
+        connection: connectionString,
+        pool: { min: 2, max: 10 },
+      })
+    )
+  }
+
+  return readDbCache.get(connectionString)!
+}
+
+async function getOrgResidency(orgId: string): Promise<Residency | undefined> {
+  const organization = await db('organizations')
+    .where({ id: orgId })
+    .first(['residency'])
+
+  const residency = organization?.residency
+  return residency === 'EU' || residency === 'US' ? residency : undefined
+}
+
+async function getTeamOrganizationId(teamId: string): Promise<string | undefined> {
+  const team = await db('teams').where({ id: teamId }).first(['organization_id'])
+  return team?.organization_id
+}
+
+async function resolveReadDbForOrg(orgId?: string): Promise<Knex> {
+  if (!orgId) {
+    return db
+  }
+
+  const residency = await getOrgResidency(orgId)
+  return getResidencyReadDb(residency)
+}
 
 /**
  * In-memory org access middleware (used by orgVaults routes).
@@ -59,7 +120,8 @@ export const requireOrgRole = (roles: (OrgRole | string)[]) => {
     }
 
     try {
-      const membership = await db('org_members').where({ org_id: orgId, user_id: userId }).first()
+      const readDb = await resolveReadDbForOrg(orgId)
+      const membership = await readDb('org_members').where({ org_id: orgId, user_id: userId }).first()
       if (!membership || !roles.includes(membership.role)) {
         res.status(403).json({ error: `Forbidden: requires organization role ${roles.join(' or ')}` })
         return
@@ -85,7 +147,9 @@ export const requireTeamRole = (roles: (OrgRole | string)[]) => {
     }
 
     try {
-      const membership = await db('team_members').where({ team_id: teamId, user_id: userId }).first()
+      const organizationId = await getTeamOrganizationId(teamId)
+      const readDb = await resolveReadDbForOrg(organizationId)
+      const membership = await readDb('team_members').where({ team_id: teamId, user_id: userId }).first()
       if (!membership || !roles.includes(membership.role)) {
         res.status(403).json({ error: `Forbidden: requires team role ${roles.join(' or ')}` })
         return

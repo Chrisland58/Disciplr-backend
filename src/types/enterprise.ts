@@ -31,10 +31,13 @@ export interface EnterpriseMilestone {
 
 export type EnterpriseResponse<T> = T | { data: T };
 
+export type Residency = 'EU' | 'US'
+
 export interface Organization {
   id: string;
   name: string;
   slug: string;
+  residency?: Residency;
   metadata?: Record<string, unknown> | null;
   created_at?: Date;
   updated_at?: Date;
@@ -43,6 +46,7 @@ export interface Organization {
 export interface CreateOrganizationInput {
   name: string;
   slug: string;
+  residency?: Residency;
   metadata?: Record<string, unknown>;
 }
 

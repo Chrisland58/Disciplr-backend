@@ -6,6 +6,7 @@ export const createOrganization = async (input: CreateOrganizationInput): Promis
     .insert({
       name: input.name,
       slug: input.slug,
+      residency: input.residency || null,
       metadata: input.metadata ? JSON.stringify(input.metadata) : null,
     })
     .returning('*')
