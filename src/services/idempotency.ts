@@ -2,6 +2,10 @@ import { Knex } from 'knex'
 import { ParsedEvent } from '../types/horizonSync.js'
 import { createHash } from 'node:crypto'
 
+function getCanonicalEventKey(event: ParsedEvent): string {
+  return event.eventKey ?? `${event.transactionHash}:${event.ledgerNumber}:${event.eventIndex}`
+}
+
 export class IdempotencyConflictError extends Error {
   constructor(message = 'Idempotency key conflict') {
     super(message)
@@ -54,11 +58,14 @@ export class IdempotencyService {
    * @param trx - Optional transaction to use for the check
    * @returns Promise<boolean> - True if already processed
    */
-  async isEventProcessed(eventId: string, trx?: Knex.Transaction): Promise<boolean> {
+  async isEventProcessed(event: ParsedEvent, trx?: Knex.Transaction): Promise<boolean> {
+    const eventKey = getCanonicalEventKey(event)
     const query = (trx || this.db)('processed_events')
-      .where({ event_id: eventId })
+      .where(function () {
+        this.where({ event_id: event.eventId }).orWhere({ event_key: eventKey })
+      })
       .first()
-    
+
     const result = await query
     return !!result
   }
@@ -73,6 +80,7 @@ export class IdempotencyService {
   async markEventProcessed(event: ParsedEvent, trx: Knex.Transaction): Promise<void> {
     await trx('processed_events').insert({
       event_id: event.eventId,
+      event_key: getCanonicalEventKey(event),
       transaction_hash: event.transactionHash,
       event_index: event.eventIndex,
       ledger_number: event.ledgerNumber,

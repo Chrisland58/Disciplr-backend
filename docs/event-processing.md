@@ -33,12 +33,12 @@ The processor will retry the operation with exponential backoff. If the parent e
 
 ## Idempotency
 
-Every event has a unique `eventId` formatted as `{transaction_hash}:{event_index}`. 
+Every event has a unique `eventId` formatted as `{transaction_hash}:{event_index}`. The processor also derives a canonical `event_key` from `{transaction_hash}:{ledger_number}:{event_index}`, which is persisted to `processed_events` and enforced with a unique database index.
 
 1. Before processing, the system checks the `processed_events` table.
-2. If the `eventId` exists, the event is skipped as "already processed."
+2. If the `eventId` or canonical `event_key` exists, the event is skipped as "already processed."
 3. If not, the event is processed within a database transaction.
-4. Upon success, the `eventId` is recorded in `processed_events` before committing.
+4. Upon success, both `eventId` and the canonical `event_key` are recorded in `processed_events` before committing.
 
 ## Error Handling & Dead Letter Queue
 

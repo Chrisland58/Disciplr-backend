@@ -138,7 +138,7 @@ export class EventProcessor {
     const trx = await this.db.transaction()
 
     try {
-      const alreadyProcessed = await this.idempotency.isEventProcessed(event.eventId, trx)
+      const alreadyProcessed = await this.idempotency.isEventProcessed(event, trx)
       if (alreadyProcessed) {
         await trx.commit()
         return

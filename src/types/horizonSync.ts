@@ -16,6 +16,7 @@ export interface ParsedEvent {
   transactionHash: string
   eventIndex: number
   ledgerNumber: number
+  eventKey?: string
   eventType: EventType
   payload: VaultEventPayload | MilestoneEventPayload | ValidationEventPayload
 }

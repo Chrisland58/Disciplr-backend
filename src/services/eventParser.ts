@@ -95,6 +95,10 @@ function readDateField(record: DecodedPayload, key: string): Date | undefined {
   return undefined
 }
 
+export function createEventKey(txHash: string, ledgerNumber: number, eventIndex: number): string {
+  return `${txHash}:${ledgerNumber}:${eventIndex}`
+}
+
 /**
  * Validates vault_created event payload
  * 
@@ -605,6 +609,7 @@ export function parseHorizonEvent(rawEvent: HorizonEvent): ParseResult {
       transactionHash: rawEvent.txHash,
       eventIndex,
       ledgerNumber: rawEvent.ledger,
+      eventKey: createEventKey(rawEvent.txHash, rawEvent.ledger, eventIndex),
       eventType,
       payload
     }
