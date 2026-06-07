@@ -58,6 +58,7 @@ export const envSchema = z
     JWT_ACCESS_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, "invalid duration format").default("15m"),
     JWT_REFRESH_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, "invalid duration format").default("7d"),
     DOWNLOAD_SECRET: z.string().min(16, "must be at least 16 characters").default("change-me-in-production-long-secret"),
+    STRIPE_WEBHOOK_SECRET: z.string().optional(),
 
     // JWT key rotation support – JSON encoded array of {kid, secret, retiredAt?}
     JWT_KEYS: z
@@ -146,7 +147,6 @@ export const envSchema = z
 
     // ── Misc / Limits ───────────────────────────────────────
     MAX_JSON_BODY_SIZE: z.string().default('500kb'),
-    NOTIFICATION_PROVIDER: z.string().optional(),
     HORIZON_LAG_THRESHOLD: nonNegativeInt(10),
     HORIZON_SHUTDOWN_TIMEOUT_MS: positiveInt(30_000),
 

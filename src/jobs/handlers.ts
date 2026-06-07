@@ -3,6 +3,8 @@ import { processJob as processExportJob } from '../services/exportQueue.js'
 import type { JobHandler, JobType } from './types.js'
 import { markVaultExpiries } from '../services/vaultExpiry.service.js'
 import { cleanupExpiredSessions } from '../services/session.js'
+import { BillingWebhookService } from '../services/billingWebhook.js'
+import { buildSlashOnMissPayload } from '../services/soroban.js'
 
 type JobHandlerRegistry = {
   [K in JobType]: JobHandler<K>
@@ -74,4 +76,29 @@ export const createDefaultJobHandlers = (
       `deleted=${deleted} batchSize=${batchSize} attempt=${context.attempt}`,
     )
   },
-}
+  'billing.event.process': async (payload, context) => {
+    await BillingWebhookService.updateProcessingStatus(
+      payload.billingEventId,
+      'processing'
+    )
+    logJob(
+      'billing.event.process',
+      `billingEventId=${payload.billingEventId} organizationId=${payload.organizationId} attempt=${context.attempt}`,
+    )
+    try {
+      // Mark as completed - actual processing would happen here
+      await BillingWebhookService.updateProcessingStatus(
+        payload.billingEventId,
+        'completed'
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      await BillingWebhookService.updateProcessingStatus(
+        payload.billingEventId,
+        'failed',
+        message
+      )
+      throw error
+    }
+  },
+})
