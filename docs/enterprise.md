@@ -39,133 +39,246 @@ Enterprise features are controlled via a feature flag matrix:
 - The `isEnterprise` flag is accurately populated by the Identity Provider or the core auth service.
 - All enterprise-specific data is tagged with an `organization_id` for isolation.
 
-## Billing Webhooks
-The Disciplr API provides a secure webhook receiver for Stripe billing events, allowing external billing systems to send billing state changes to the platform.
+## Feature Flag Service
 
-### Endpoint
-**POST** `/api/billing/webhooks`
+### Overview
 
-### Authentication
-Billing webhooks do not require JWT authentication. Instead, they use cryptographic signature verification via the `Stripe-Signature` header.
+The Feature Flag Service provides runtime-configurable boolean flags that enable gradual rollouts, A/B testing, and per-organization feature control without requiring code deployments.
 
-### Required Headers
-- **`Stripe-Signature`**: Webhook signature from Stripe (format: `t=timestamp,v1=signature`)
-- **`X-Organization-Id`**: Organization ID for multi-tenant routing
+### Architecture
 
-### Configuration
-The webhook receiver requires the following environment variable:
-```bash
-STRIPE_WEBHOOK_SECRET=whsec_...  # From Stripe Dashboard → Webhooks
+- **Scope**: Global defaults with per-organization overrides
+- **Storage**: PostgreSQL `feature_flags` table
+- **Caching**: Per-process LRU cache (1000 entries max, 5-minute TTL)
+- **Fallback**: Organization-specific → Global → False (default)
+
+### Available Flags
+
+All flags are defined in the `FeatureFlag` enum in `src/services/featureFlags.ts`:
+
+| Flag Name | Purpose | Default |
+|-----------|---------|---------|
+| `ENTERPRISE_ANALYTICS` | Enable advanced analytics dashboard for enterprise orgs | `false` |
+| `MULTI_VERIFIER_ENABLED` | Enable multi-signature vault verification | `false` |
+| `ORGANIZATION_QUOTAS` | Enable org-level resource quotas and limits | `false` |
+| `ADVANCED_ANALYTICS` | Enable machine learning-driven analytics insights | `false` |
+
+To add a new flag:
+1. Add to the `FeatureFlag` enum in `src/services/featureFlags.ts`
+2. Seed it in the migration `db/migrations/20260603000000_create_feature_flags.cjs`
+3. Use `getFlag()` in your endpoint handlers
+
+### Admin Endpoints
+
+#### Get All Flags
+
+```http
+GET /api/admin/flags
+GET /api/admin/flags?orgId=org-123
 ```
 
-### Signature Verification
-Stripe webhook signatures are verified using HMAC-SHA256:
-1. Extract timestamp (`t`) and signature (`v1`) from `Stripe-Signature` header
-2. Verify timestamp is within 5 minutes of current time (prevents replay attacks)
-3. Compute `HMAC-SHA256(secret, timestamp.payload)` and compare with provided `v1`
-4. Return `401 Unauthorized` if verification fails
+**Query Parameters:**
+- `orgId` (optional): Organization ID to fetch org-specific overrides merged with global defaults
 
-### Event Processing
-When a webhook is received:
-1. **Verify signature** using the Stripe webhook secret
-2. **Check idempotency** via `stripe_event_id` to prevent duplicate processing
-3. **Persist event** to `billing_events` table for audit trail
-4. **Enqueue job** for asynchronous processing via the job queue
-5. **Return 202 Accepted** immediately (event is processed asynchronously)
-
-### Request Example
-```bash
-curl -X POST https://api.disciplr.io/api/billing/webhooks \
-  -H "Content-Type: application/json" \
-  -H "Stripe-Signature: t=1234567890,v1=abc123def456..." \
-  -H "X-Organization-Id: org-enterprise-1" \
-  -d '{
-    "id": "evt_1234567890",
-    "object": "event",
-    "type": "customer.subscription.created",
-    "data": { ... }
-  }'
-```
-
-### Response (202 Accepted)
+**Response:**
 ```json
 {
-  "received": true,
-  "eventId": "evt_1234567890",
-  "type": "customer.subscription.created",
-  "billingEventId": "uuid-here",
-  "jobId": "job-uuid-here"
+  "data": {
+    "orgId": "org-123",
+    "flags": {
+      "ENTERPRISE_ANALYTICS": true,
+      "MULTI_VERIFIER_ENABLED": false,
+      "ORGANIZATION_QUOTAS": true,
+      "ADVANCED_ANALYTICS": false
+    },
+    "timestamp": "2025-06-03T14:30:00Z"
+  }
 }
 ```
 
-### Error Responses
+#### Set Feature Flag
 
-#### 400 Bad Request
-Invalid JSON payload or missing required fields.
-
-#### 401 Unauthorized
-- Missing or invalid `Stripe-Signature` header
-- Webhook signature verification failed
-- Timestamp too old (>5 minutes)
-
-#### 403 Forbidden
-Missing `X-Organization-Id` header.
-
-#### 409 Conflict
-Event with the same `stripe_event_id` already processed (idempotent - can retry safely).
-
-#### 500 Internal Server Error
-- Webhook secret not configured (`STRIPE_WEBHOOK_SECRET`)
-- Database persistence failure
-
-### Idempotency Guarantee
-The billing webhook receiver provides exactly-once delivery semantics:
-- Each Stripe event ID is stored in the `billing_events` table as a unique key
-- Duplicate webhook deliveries return immediately with a `202` response
-- Safe to retry failed requests without duplicate processing
-
-### Database Schema
-```sql
-CREATE TABLE billing_events (
-  id UUID PRIMARY KEY,
-  organization_id VARCHAR(255) NOT NULL,
-  stripe_event_id VARCHAR(255) NOT NULL UNIQUE,
-  event_type VARCHAR(255) NOT NULL,
-  raw_event JSONB NOT NULL,
-  event_occurred_at TIMESTAMP,
-  processed BOOLEAN DEFAULT FALSE,
-  processing_status VARCHAR(50) DEFAULT 'pending',
-  processing_error TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_billing_events_org_id ON billing_events(organization_id);
-CREATE INDEX idx_billing_events_stripe_id ON billing_events(stripe_event_id);
-CREATE INDEX idx_billing_events_processed ON billing_events(processed);
+```http
+PATCH /api/admin/flags/:name
 ```
 
-### Monitoring & Debugging
-Events can be queried by organization:
+**Request Body:**
+```json
+{
+  "enabled": true,
+  "orgId": "org-123"
+}
+```
+
+**Parameters:**
+- `:name` - Feature flag name (from `FeatureFlag` enum)
+- `enabled` (required) - Boolean to enable/disable the flag
+- `orgId` (optional) - Organization ID for org-specific override; omit for global flag
+
+**Response:**
+```json
+{
+  "data": {
+    "flag": "ENTERPRISE_ANALYTICS",
+    "orgId": "org-123",
+    "enabled": true,
+    "timestamp": "2025-06-03T14:30:00Z"
+  }
+}
+```
+
+**Error Responses:**
+- `400 Bad Request` - Invalid flag name or request body
+- `403 Forbidden` - User is not an admin
+- `500 Internal Server Error` - Database error
+
+**Examples:**
+
+Enable flag globally:
 ```bash
-SELECT * FROM billing_events 
-WHERE organization_id = 'org-123'
-ORDER BY created_at DESC
-LIMIT 100;
+curl -X PATCH https://api.disciplr.com/api/admin/flags/ENTERPRISE_ANALYTICS \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
 ```
 
-Check processing status:
+Enable flag for specific organization:
 ```bash
-SELECT event_type, processing_status, COUNT(*) as count
-FROM billing_events
-WHERE organization_id = 'org-123'
-GROUP BY event_type, processing_status;
+curl -X PATCH https://api.disciplr.com/api/admin/flags/MULTI_VERIFIER_ENABLED \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true, "orgId": "org-123"}'
 ```
 
-Inspect failures:
+Disable flag for organization:
 ```bash
-SELECT stripe_event_id, event_type, processing_error
-FROM billing_events
-WHERE organization_id = 'org-123' AND processing_status = 'failed'
-ORDER BY created_at DESC;
+curl -X PATCH https://api.disciplr.com/api/admin/flags/ENTERPRISE_ANALYTICS \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false, "orgId": "org-456"}'
 ```
 
+### Client-Side Usage
+
+Handlers should check feature flags at runtime to gate features:
+
+```typescript
+import { getFlag, FeatureFlag } from '../services/featureFlags'
+
+// In an endpoint handler
+app.get('/api/analytics/advanced', async (req, res) => {
+  const orgId = req.user?.orgId
+  
+  // Check if feature is enabled for this org
+  const advancedAnalyticsEnabled = await getFlag(
+    FeatureFlag.ADVANCED_ANALYTICS,
+    orgId
+  )
+  
+  if (!advancedAnalyticsEnabled) {
+    return res.status(403).json({
+      error: 'Advanced analytics not available for this organization'
+    })
+  }
+  
+  // Feature is enabled, proceed with implementation
+  const analytics = await computeAdvancedMetrics(orgId)
+  res.json(analytics)
+})
+```
+
+For middleware or service-layer checks:
+
+```typescript
+import { getAllFlags } from '../services/featureFlags'
+
+// Get all flags for an org at once (more efficient than multiple getFlag calls)
+const flags = await getAllFlags(orgId)
+
+if (flags.ORGANIZATION_QUOTAS) {
+  // Apply quota logic
+  enforceOrgQuotas(orgId)
+}
+```
+
+### Org-Level Overrides
+
+Organizations can have custom feature settings that override global defaults:
+
+**Scenario:** Global `ENTERPRISE_ANALYTICS` is `false`, but org-123 has it enabled:
+
+```bash
+# Set global (all orgs get this unless overridden)
+curl -X PATCH https://api.disciplr.com/api/admin/flags/ENTERPRISE_ANALYTICS \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"enabled": false}'
+
+# Override for specific org
+curl -X PATCH https://api.disciplr.com/api/admin/flags/ENTERPRISE_ANALYTICS \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"enabled": true, "orgId": "org-123"}'
+```
+
+Now when org-123 fetches the flag, they get `true` (override), while other orgs get `false` (global default).
+
+### Performance & Caching
+
+**Cache Strategy:**
+- First call for a flag: queries database
+- Subsequent calls (within 5 minutes): returns cached value
+- After 5 minutes: cache expires, next call queries database
+- Cache invalidation: automatic on `setFlag()` updates
+
+**Cache Hit Example:**
+```
+Request 1: getFlag('ENTERPRISE_ANALYTICS', 'org-123')
+  → Cache miss, query DB, store in cache
+Request 2: getFlag('ENTERPRISE_ANALYTICS', 'org-123')  [within 5 min]
+  → Cache hit, return immediately (~1ms vs ~20ms for DB query)
+Request 3: setFlag('ENTERPRISE_ANALYTICS', 'org-123', false)
+  → Cache invalidated for this key
+Request 4: getFlag('ENTERPRISE_ANALYTICS', 'org-123')
+  → Cache miss, query DB with fresh value
+```
+
+**Monitoring Cache Stats:**
+```typescript
+import { getCacheStats } from '../services/featureFlags'
+
+const stats = getCacheStats()
+console.log(`Cache entries: ${stats.size}/${stats.maxSize}`)
+```
+
+### Audit Logging
+
+All flag changes are automatically logged to the audit trail:
+
+```json
+{
+  "action": "admin.feature_flag.update",
+  "target_type": "feature_flag",
+  "target_id": "ENTERPRISE_ANALYTICS:org-123",
+  "metadata": {
+    "flag_name": "ENTERPRISE_ANALYTICS",
+    "org_id": "org-123",
+    "enabled": true,
+    "timestamp": "2025-06-03T14:30:00Z"
+  }
+}
+```
+
+Query audit logs to track who changed what and when:
+
+```bash
+curl "https://api.disciplr.com/api/admin/audit-logs?action=admin.feature_flag.update" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+### Best Practices
+
+1. **Always check at request time** - Don't cache flag values in your code; let the service handle caching
+2. **Use enum for type safety** - Import `FeatureFlag` enum and use its values, not magic strings
+3. **Provide fallback behavior** - If a flag doesn't exist, the service returns `false`; handle this gracefully
+4. **Document flag purpose** - Add comments explaining why a flag exists and when to remove it
+5. **Gradual rollout** - Start with org-specific flags, then enable globally after validation
+6. **Monitor via audit logs** - Use audit trail to track who enabled/disabled what and audit access to analytics features

@@ -31,7 +31,7 @@ const httpUrl = () =>
     .string()
     .refine(
       (url) => /^https?:\/\/./.test(url),
-      'must be a valid HTTP or HTTPS URL (e.g., https://example.com)',
+      "must be a valid HTTP or HTTPS URL (e.g., https://example.com)",
     );
 
 /** Schema for all environment variables consumed by the application. */
@@ -41,24 +41,43 @@ export const envSchema = z
     NODE_ENV: z
       .enum(["development", "production", "test"])
       .default("development"),
-    LOG_LEVEL: z
-      .enum(["debug", "info", "warn", "error"])
-      .default("info"),
+    LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
     PORT: positiveInt(3000),
     SERVICE_NAME: z.string().default("disciplr-backend"),
-    DATABASE_URL: z.string().min(1, "DATABASE_URL is required").refine(
-      (url) => url.startsWith('postgres://') || url.startsWith('postgresql://'),
-      'DATABASE_URL must be a valid PostgreSQL connection URL'
-    ),
+    DATABASE_URL: z
+      .string()
+      .min(1, "DATABASE_URL is required")
+      .refine(
+        (url) =>
+          url.startsWith("postgres://") || url.startsWith("postgresql://"),
+        "DATABASE_URL must be a valid PostgreSQL connection URL",
+      ),
 
     // ── Auth / secrets ──────────────────────────────────────
-    JWT_SECRET: z.string().min(16, "must be at least 16 characters").default("change-me-in-production-long-secret"),
-    JWT_ACCESS_SECRET: z.string().min(16, "must be at least 16 characters").default("fallback-access-secret"),
-    JWT_REFRESH_SECRET: z.string().min(16, "must be at least 16 characters").default("fallback-refresh-secret"),
-    JWT_ACCESS_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, "invalid duration format").default("15m"),
-    JWT_REFRESH_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, "invalid duration format").default("7d"),
-    DOWNLOAD_SECRET: z.string().min(16, "must be at least 16 characters").default("change-me-in-production-long-secret"),
-    STRIPE_WEBHOOK_SECRET: z.string().optional(),
+    JWT_SECRET: z
+      .string()
+      .min(16, "must be at least 16 characters")
+      .default("change-me-in-production-long-secret"),
+    JWT_ACCESS_SECRET: z
+      .string()
+      .min(16, "must be at least 16 characters")
+      .default("fallback-access-secret"),
+    JWT_REFRESH_SECRET: z
+      .string()
+      .min(16, "must be at least 16 characters")
+      .default("fallback-refresh-secret"),
+    JWT_ACCESS_EXPIRES_IN: z
+      .string()
+      .regex(/^\d+[smhd]$/, "invalid duration format")
+      .default("15m"),
+    JWT_REFRESH_EXPIRES_IN: z
+      .string()
+      .regex(/^\d+[smhd]$/, "invalid duration format")
+      .default("7d"),
+    DOWNLOAD_SECRET: z
+      .string()
+      .min(16, "must be at least 16 characters")
+      .default("change-me-in-production-long-secret"),
 
     // JWT key rotation support – JSON encoded array of {kid, secret, retiredAt?}
     JWT_KEYS: z
@@ -68,7 +87,8 @@ export const envSchema = z
         if (!val) return [];
         try {
           const parsed = JSON.parse(val);
-          if (!Array.isArray(parsed)) throw new Error("JWT_KEYS must be an array");
+          if (!Array.isArray(parsed))
+            throw new Error("JWT_KEYS must be an array");
           return parsed.map((item: any) => {
             const ret = item.retiredAt ? new Date(item.retiredAt) : undefined;
             return { kid: item.kid, secret: item.secret, retiredAt: ret };
@@ -79,30 +99,39 @@ export const envSchema = z
       }),
 
     // ── Horizon / Stellar ─────────────────────────────────────
-    HORIZON_URL: z.string().optional().refine(
-      (url) => !url || url.startsWith('http://') || url.startsWith('https://'),
-      'HORIZON_URL must be a valid HTTP or HTTPS URL'
-    ),
-    CORS_ORIGINS: z.string().optional().refine(
-      (val) => {
+    HORIZON_URL: z
+      .string()
+      .optional()
+      .refine(
+        (url) =>
+          !url || url.startsWith("http://") || url.startsWith("https://"),
+        "HORIZON_URL must be a valid HTTP or HTTPS URL",
+      ),
+    CORS_ORIGINS: z
+      .string()
+      .optional()
+      .refine((val) => {
         if (val === undefined) return true;
         if (val === "") return false;
-        if (val === '*') return true;
-        const parts = val.split(',');
-        return parts.length > 0 && parts.every(p => p.trim().startsWith('http'));
-      },
-      'CORS_ORIGINS cannot be empty'
-    ),
+        if (val === "*") return true;
+        const parts = val.split(",");
+        return (
+          parts.length > 0 && parts.every((p) => p.trim().startsWith("http"))
+        );
+      }, "CORS_ORIGINS cannot be empty"),
     CONTRACT_ADDRESS: z.string().optional(),
     START_LEDGER: nonNegativeInt(0).optional(),
     RETRY_MAX_ATTEMPTS: nonNegativeInt(3),
     RETRY_BACKOFF_MS: nonNegativeInt(100),
 
     // ── Soroban ────────────────────────────────────────────────
-    SOROBAN_CONTRACT_ID: z.string().optional().refine(
-      (v) => !v || /^C[0-9A-Z]{55}$/.test(v),
-      'must be a valid Soroban contract ID (56-char base32 starting with C)'
-    ),
+    SOROBAN_CONTRACT_ID: z
+      .string()
+      .optional()
+      .refine(
+        (v) => !v || /^C[0-9A-Z]{55}$/.test(v),
+        "must be a valid Soroban contract ID (56-char base32 starting with C)",
+      ),
     SOROBAN_NETWORK_PASSPHRASE: z.string().optional(),
     SOROBAN_SOURCE_ACCOUNT: z.string().optional(),
     SOROBAN_RPC_URL: httpUrl().optional(),
@@ -111,6 +140,7 @@ export const envSchema = z
     SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS: positiveInt(30),
     SOROBAN_RPC_TIMEOUT_MS: positiveInt(30_000),
     SOROBAN_SUBMIT_RETRY_MAX_BACKOFF_MS: positiveInt(5_000),
+    SOROBAN_SUBMIT_TIMEOUT_MS: positiveInt(60_000),
     STELLAR_NETWORK_PASSPHRASE: z.string().optional(),
 
     // ── Job system ───────────────────────────────────────────────
@@ -146,7 +176,8 @@ export const envSchema = z
     ANALYTICS_RECOMPUTE_INTERVAL_MS: positiveInt(300_000),
 
     // ── Misc / Limits ───────────────────────────────────────
-    MAX_JSON_BODY_SIZE: z.string().default('500kb'),
+    MAX_JSON_BODY_SIZE: z.string().default("500kb"),
+    NOTIFICATION_PROVIDER: z.string().optional(),
     HORIZON_LAG_THRESHOLD: nonNegativeInt(10),
     HORIZON_SHUTDOWN_TIMEOUT_MS: positiveInt(30_000),
 
@@ -154,6 +185,21 @@ export const envSchema = z
     EXPORT_S3_BUCKET: z.string().optional(),
     EXPORT_S3_REGION: z.string().optional(),
     EXPORT_SIGNED_URL_TTL_S: positiveInt(3600),
+
+    // ── HTTP Server Timeouts ─────────────────────────────────
+    // Protects against slow-loris attacks and load balancer connection drops.
+    // Defaults (in ms):
+    //   - keepAliveTimeout: 45,000 (45s, must be < headersTimeout)
+    //   - headersTimeout: 61,000 (61s, Node.js server-level timeout)
+    //   - requestTimeout: 120,000 (120s, full request lifecycle)
+    // Rationale:
+    //   - keepAliveTimeout < headersTimeout prevents keep-alive sockets from
+    //     lingering past when the server would timeout the headers.
+    //   - headersTimeout slightly > 60s accommodates ALB idle timeout defaults.
+    //   - requestTimeout allows slower uploads/downloads but remains bounded.
+    HTTP_KEEPALIVE_TIMEOUT_MS: positiveInt(45_000),
+    HTTP_HEADERS_TIMEOUT_MS: positiveInt(61_000),
+    HTTP_REQUEST_TIMEOUT_MS: positiveInt(120_000),
   })
   .superRefine((data, ctx) => {
     // Existing CORS warning
@@ -164,11 +210,30 @@ export const envSchema = z
         message: 'CORS_ORIGINS cannot be "*" in production environment',
       });
     }
+
+    // ─ Validate HTTP timeout ordering ─
+    if (data.HTTP_KEEPALIVE_TIMEOUT_MS >= data.HTTP_HEADERS_TIMEOUT_MS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["HTTP_KEEPALIVE_TIMEOUT_MS"],
+        message: `HTTP_KEEPALIVE_TIMEOUT_MS (${data.HTTP_KEEPALIVE_TIMEOUT_MS}ms) must be less than HTTP_HEADERS_TIMEOUT_MS (${data.HTTP_HEADERS_TIMEOUT_MS}ms)`,
+      });
+    }
+
+    if (data.HTTP_HEADERS_TIMEOUT_MS >= data.HTTP_REQUEST_TIMEOUT_MS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["HTTP_HEADERS_TIMEOUT_MS"],
+        message: `HTTP_HEADERS_TIMEOUT_MS (${data.HTTP_HEADERS_TIMEOUT_MS}ms) must be less than HTTP_REQUEST_TIMEOUT_MS (${data.HTTP_REQUEST_TIMEOUT_MS}ms)`,
+      });
+    }
+
     // Additional validation for JWT_KEYS could be added here if needed
   });
 
 export type Env = z.infer<typeof envSchema>;
 export type JwtKey = { kid: string; secret: string; retiredAt?: Date };
+export type EnvWarning = { field: string; message: string };
 
 let _validated: Env | undefined;
 
@@ -177,7 +242,7 @@ let _validated: Env | undefined;
  */
 export function getEnv(): Env {
   if (!_validated) {
-    throw new Error('Environment not validated yet — call initEnv() first');
+    throw new Error("Environment not validated yet — call initEnv() first");
   }
   return _validated;
 }
@@ -236,7 +301,10 @@ export function initEnv(
       { key: "JWT_SECRET", sentinel: "change-me-in-production-long-secret" },
       { key: "JWT_ACCESS_SECRET", sentinel: "fallback-access-secret-long" },
       { key: "JWT_REFRESH_SECRET", sentinel: "fallback-refresh-secret-long" },
-      { key: "DOWNLOAD_SECRET", sentinel: "change-me-in-production-long-secret" },
+      {
+        key: "DOWNLOAD_SECRET",
+        sentinel: "change-me-in-production-long-secret",
+      },
     ];
 
     for (const { key, sentinel } of insecureDefaults) {
@@ -260,32 +328,77 @@ export function initEnv(
     }
   }
 
-    // Detect partially configured Soroban environment variables.
-    const sorobanVars = [
-      "SOROBAN_CONTRACT_ID",
-      "SOROBAN_NETWORK_PASSPHRASE",
-      "SOROBAN_SOURCE_ACCOUNT",
-      "SOROBAN_RPC_URL",
-      "SOROBAN_SECRET_KEY",
-    ];
-    const present = sorobanVars.filter((key) => validated[key as keyof Env] !== undefined && validated[key as keyof Env] !== "");
-    if (present.length > 0 && present.length < sorobanVars.length) {
-      const w: EnvWarning = {
+  // Detect partially configured Soroban environment variables.
+  const sorobanVars = [
+    "SOROBAN_CONTRACT_ID",
+    "SOROBAN_NETWORK_PASSPHRASE",
+    "SOROBAN_SOURCE_ACCOUNT",
+    "SOROBAN_RPC_URL",
+    "SOROBAN_SECRET_KEY",
+  ];
+  const present = sorobanVars.filter(
+    (key) =>
+      validated[key as keyof Env] !== undefined &&
+      validated[key as keyof Env] !== "",
+  );
+  if (present.length > 0 && present.length < sorobanVars.length) {
+    const w: EnvWarning = {
+      variable: "SOROBAN_*",
+      message:
+        "Partial Soroban configuration detected; submit mode will be disabled",
+    };
+    warnings.push(w);
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        event: "config.partial_soroban_configuration",
+        service: "disciplr-backend",
         variable: "SOROBAN_*",
-        message: "Partial Soroban configuration detected; submit mode will be disabled",
-      };
-      warnings.push(w);
-      console.warn(
-        JSON.stringify({
-          level: "warn",
-          event: "config.partial_soroban_configuration",
-          service: "disciplr-backend",
-          variable: "SOROBAN_*",
-          message: w.message,
-          timestamp: new Date().toISOString(),
-        }),
-      );
-    }
+        message: w.message,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+  }
 
   return { env: validated, warnings };
+}
+
+/**
+ * Validates and parses environment variables.
+ * Returns parsed env and any non-fatal warnings.
+ * Throws on hard validation failures.
+ */
+export function validateEnv(raw?: Record<string, string | undefined>): {
+  env: Env;
+  warnings: EnvWarning[];
+} {
+  const input = raw ?? process.env;
+  const result = envSchema.safeParse(input);
+
+  if (!result.success) {
+    const messages = result.error.issues
+      .map((i) => `${i.path.join(".")}: ${i.message}`)
+      .join("; ");
+    throw new Error(`Environment validation failed: ${messages}`);
+  }
+
+  const warnings: EnvWarning[] = [];
+
+  // Warn if Soroban vars are partially configured
+  const sorobanVars = [
+    "SOROBAN_CONTRACT_ID",
+    "SOROBAN_NETWORK_PASSPHRASE",
+    "SOROBAN_SOURCE_ACCOUNT",
+    "SOROBAN_RPC_URL",
+    "SOROBAN_SECRET_KEY",
+  ] as const;
+  const sorobanSet = sorobanVars.filter((k) => !!(result.data as any)[k]);
+  if (sorobanSet.length > 0 && sorobanSet.length < sorobanVars.length) {
+    warnings.push({
+      field: "SOROBAN",
+      message: `Soroban is partially configured (${sorobanSet.length}/${sorobanVars.length} vars set). Submit mode disabled.`,
+    });
+  }
+
+  return { env: result.data, warnings };
 }

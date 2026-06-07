@@ -9,8 +9,16 @@ import { forceRevokeUserSessions } from '../services/session.js'
 import { createAuditLog, getAuditLogById, listAuditLogs } from '../lib/audit-logs.js'
 import { cancelVaultById } from '../services/vaultStore.js'
 import { getDBHealthMetrics } from '../services/dbMetrics.js'
+import {
+  getFlag,
+  setFlag,
+  FeatureFlag,
+  isValidFeatureFlag,
+  getAllFlags,
+} from '../services/featureFlags.js'
 import { pool } from '../db/index.js'
 import { db } from '../db/knex.js'
+import { getAbuseCategoryCounts } from '../security/abuse-monitor.js'
 
 export const adminRouter = Router()
 
@@ -496,4 +504,13 @@ adminRouter.get('/db/metrics', metricsRateLimiter, async (req: Request, res: Res
     console.error('Error retrieving DB metrics:', error)
     res.status(500).json({ error: 'Failed to retrieve database metrics' })
   }
+})
+
+/**
+ * GET /api/admin/abuse/category-counts
+ * Returns per-category abuse event counts (brute-force, enumeration, payload-anomaly, rate-limit-trip).
+ * Admin only.
+ */
+adminRouter.get('/abuse/category-counts', authorize, requireAdmin, (req: Request, res: Response) => {
+  res.status(200).json({ data: getAbuseCategoryCounts() })
 })
