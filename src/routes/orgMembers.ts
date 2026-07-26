@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto'
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { authenticate } from '../middleware/auth.js'
 import { requireOrgAccess } from '../middleware/orgAuth.js'
@@ -11,6 +12,26 @@ import {
   LastAdminError,
 } from '../services/membership.js'
 import type { OrgRole } from '../models/organizations.js'
+
+/**
+ * Timing-safe string comparison for invitation token hashes.
+ *
+ * When lengths differ we still run a dummy timingSafeEqual so that the code
+ * path takes a similar amount of time regardless of the mismatch position,
+ * masking length information from timing side-channels.  Both padding operands
+ * use the *same* fixed length (64 chars) but compare `a` against `b` — not
+ * `a` against itself — so the dummy operation actually touches both values and
+ * represents the same cost as the equal-length path.
+ */
+export function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    // Dummy constant-time comparison to mask the length check via timing.
+    // Fix #1260: compare a against b (was incorrectly a against a).
+    timingSafeEqual(Buffer.from(a.padEnd(64, '0')), Buffer.from(b.padEnd(64, '0')))
+    return false
+  }
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b))
+}
 
 export const orgMembersRouter = Router()
 

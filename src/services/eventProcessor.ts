@@ -1,9 +1,21 @@
 import { Knex } from 'knex'
+import client from 'prom-client'
 import { ParsedEvent, ProcessorConfig, VaultEventPayload, MilestoneEventPayload, ValidationEventPayload } from '../types/horizonSync.js'
 import { retryWithBackoff, isRetryable } from '../utils/retry.js'
 import { createAuditLog } from '../lib/audit-logs.js'
 import { IdempotencyService } from './idempotency.js'
 import { dispatchWebhookEvent, VAULT_LIFECYCLE_EVENTS } from './webhooks.js'
+
+/**
+ * Counter incremented whenever a dead-letter write itself fails, making the
+ * loss observable via the /metrics endpoint rather than only a console.error.
+ * Fix #1264: previously this failure path had no metric — the event was
+ * silently discarded with only a console.error.
+ */
+const deadLetterWriteFailures = new client.Counter({
+  name: 'disciplr_dead_letter_write_failures_total',
+  help: 'Number of times a failed-event could not be persisted to the dead-letter table',
+})
 
 /**
  * Error thrown when a dependency (e.g., a vault for a milestone) is not yet in the DB.
@@ -281,7 +293,22 @@ export class EventProcessor {
         .onConflict('event_id')
         .merge()
     } catch (error) {
-      console.error('Failed to insert into dead letter queue:', error)
+      // Fix #1264: increment observable metric so this loss is not silent, then
+      // emit a structured log containing the full event payload so operators
+      // can recover the event from logs even when the DB is unavailable.
+      deadLetterWriteFailures.inc()
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          message: 'dead_letter_write_failed',
+          event_id: event.eventId,
+          event_type: event.eventType,
+          original_error: errorMessage,
+          dlq_error: error instanceof Error ? error.message : String(error),
+          // Full payload included so the event can be replayed from log aggregator
+          event_payload: JSON.stringify(event),
+        }),
+      )
     }
   }
 

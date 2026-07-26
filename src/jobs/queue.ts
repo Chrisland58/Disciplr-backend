@@ -102,6 +102,7 @@ const createEmptyTypeMetrics = (): Record<JobType, QueueTypeMetrics> => {
     'oracle.call': { queued: 0, delayed: 0, active: 0, completed: 0, failed: 0, deadLetter: 0 },
     'analytics.recompute': { queued: 0, delayed: 0, active: 0, completed: 0, failed: 0, deadLetter: 0 },
     'export.generate': { queued: 0, delayed: 0, active: 0, completed: 0, failed: 0, deadLetter: 0 },
+    'sessions.cleanup': { queued: 0, delayed: 0, active: 0, completed: 0, failed: 0, deadLetter: 0 },
   }
 }
 
@@ -355,6 +356,18 @@ export class InMemoryJobQueue {
       durationMs,
     })
     this.trimHistory(this.completedJobs)
+  }
+
+  private recordFailedJob(job: InternalQueuedJob<JobType>, error: string): void {
+    this.totals.failed += 1
+    this.failedJobs.unshift({
+      jobId: job.id,
+      type: job.type,
+      failedAt: new Date().toISOString(),
+      attempts: job.attempt,
+      error,
+    })
+    this.trimHistory(this.failedJobs)
   }
 
   private moveToDeadLetter(job: InternalQueuedJob<JobType>, error: string): void {
