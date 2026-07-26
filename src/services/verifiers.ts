@@ -448,19 +448,35 @@ export const getMilestoneApprovals = async (
   rejected: MilestoneApproval[]
   pending: MilestoneApproval[]
 }> => {
-  const rows = await db('milestone_approvals')
+  interface MilestoneApprovalRow {
+    id: string
+    milestone_id: string
+    verifier_user_id: string
+    approval_status: unknown
+    created_at: string
+    updated_at: string
+  }
+
+  const rows = await db<MilestoneApprovalRow>('milestone_approvals')
     .where({ milestone_id: milestoneId })
     .orderBy('created_at', 'asc')
 
-  const grouped = {
-    approved: [] as MilestoneApproval[],
-    rejected: [] as MilestoneApproval[],
-    pending: [] as MilestoneApproval[],
+  const VALID_STATUSES = new Set<MilestoneApprovalStatus>(['approved', 'rejected', 'pending'])
+
+  const grouped: Record<MilestoneApprovalStatus, MilestoneApproval[]> = {
+    approved: [],
+    rejected: [],
+    pending: [],
   }
 
   rows.forEach((row) => {
-    const mapped = mapMilestoneApprovalRow(row)
-    grouped[row.approval_status].push(mapped)
+    const status = row.approval_status
+    if (typeof status !== 'string' || !VALID_STATUSES.has(status as MilestoneApprovalStatus)) {
+      // Unrecognised status from DB — route to pending rather than throw
+      grouped.pending.push(mapMilestoneApprovalRow(row))
+      return
+    }
+    grouped[status as MilestoneApprovalStatus].push(mapMilestoneApprovalRow(row))
   })
 
   return grouped
@@ -522,10 +538,22 @@ export const hasMilestoneMetThreshold = async (
 
 /**
  * Get approval progress for a milestone (X of Y approvals).
+ *
+ * Veto math (when totalVerifiers N is provided):
+ *   A milestone is irrevocably rejected once it is impossible for approvals
+ *   to ever reach the threshold M:
+ *     isRejected = (approved + remaining) < M
+ *   where remaining = N - totalVoted.
+ *
+ *   Equivalently: rejected > N - M  (more rejections than the veto budget).
+ *
+ * When totalVerifiers is omitted (legacy / N unknown), any single rejection
+ * marks the milestone rejected (conservative default).
  */
 export const getMilestoneApprovalProgress = async (
   milestoneId: string,
   approvalThreshold: number,
+  totalVerifiers?: number,
 ): Promise<{
   approved: number
   rejected: number
@@ -533,19 +561,35 @@ export const getMilestoneApprovalProgress = async (
   required: number
   isComplete: boolean
   isRejected: boolean
+  approvalPercentage: number
 }> => {
   const approvals = await getMilestoneApprovals(milestoneId)
   const approved = approvals.approved.length
   const rejected = approvals.rejected.length
   const pending = approvals.pending.length
+  const totalVoted = approved + rejected + pending
+
+  // Veto math: can we still reach threshold?
+  let isRejected: boolean
+  if (totalVerifiers !== undefined && totalVerifiers > 0) {
+    const remaining = totalVerifiers - totalVoted
+    const maxPossibleApprovals = approved + Math.max(remaining, 0)
+    isRejected = maxPossibleApprovals < approvalThreshold
+  } else {
+    // Legacy: any rejection vetoes
+    isRejected = rejected > 0
+  }
+
+  const approvalPercentage = totalVoted === 0 ? 0 : Math.min((approved / totalVoted) * 100, 100)
 
   return {
     approved,
     rejected,
     pending,
     required: approvalThreshold,
-    isComplete: approved >= approvalThreshold,
-    isRejected: rejected > 0, // Reject if any verifier rejects
+    isComplete: approved >= approvalThreshold && !isRejected,
+    isRejected,
+    approvalPercentage,
   }
 }
 

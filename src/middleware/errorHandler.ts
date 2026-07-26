@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express'
+import { sanitizePrivacyPayload } from '../utils/privacy.js'
 
 // ─── Error Codes ─────────────────────────────────────────────────────────────
 // Machine-readable codes clients can branch on without parsing message strings.
@@ -22,6 +23,8 @@ export const ErrorCode = {
   RATE_LIMITED: 'RATE_LIMITED',
   // 500
   INTERNAL_ERROR: 'INTERNAL_ERROR',
+  // 504
+  SOROBAN_TIMEOUT: 'SOROBAN_TIMEOUT',
 } as const
 
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode]
@@ -47,6 +50,7 @@ export const SorobanErrorCatalog: Record<number, { code: ErrorCode; message: str
   14: { code: ErrorCode.CONFLICT, message: 'Milestones incomplete', status: 409 },
   15: { code: ErrorCode.CONFLICT, message: 'Nothing to withdraw', status: 409 },
   16: { code: ErrorCode.VALIDATION_ERROR, message: 'Amount mismatch', status: 400 },
+  28: { code: ErrorCode.VALIDATION_ERROR, message: 'Deadline is in the past', status: 400 },
 }
 
 // ─── Uniform error response shape ────────────────────────────────────────────
@@ -116,6 +120,38 @@ export class AppError extends Error {
   static payloadTooLarge(message = 'Payload too large') {
     return new AppError(413, ErrorCode.PAYLOAD_TOO_LARGE, message)
   }
+
+  /** Parses an unknown error from Soroban RPC into an AppError if it contains a recognized contract error code */
+  static fromContractError(err: unknown): AppError | null {
+    const message = err instanceof Error ? err.message : String(err)
+    // Matches Soroban Error(Contract, 4) or similar representations
+    const match = message.match(/Error\(Contract,\s*(\d+)\)/i) || message.match(/ContractError\((\d+)\)/i)
+    if (!match) return null
+
+    const codeInt = parseInt(match[1], 10)
+    const mapping = SorobanErrorCatalog[codeInt]
+    if (!mapping) return null
+
+    return new AppError(mapping.status, mapping.code, mapping.message, { contractErrorCode: codeInt })
+  }
+}
+
+/**
+ * Thrown when the Soroban transaction status polling deadline is exceeded.
+ * Maps to HTTP 504 Gateway Timeout.
+ */
+export class SorobanTimeoutError extends Error {
+  readonly code = ErrorCode.SOROBAN_TIMEOUT
+  readonly status = 504
+  readonly txHash: string
+  readonly elapsedMs: number
+
+  constructor(txHash: string, elapsedMs: number) {
+    super(`Soroban transaction ${txHash} did not finalise within ${elapsedMs}ms`)
+    this.name = 'SorobanTimeoutError'
+    this.txHash = txHash
+    this.elapsedMs = elapsedMs
+  }
 }
 
 // ─── Express error-handler middleware ────────────────────────────────────────
@@ -130,6 +166,13 @@ export const errorHandler = (
   // Structured log – no stack trace in the response, but captured here for ops.
   // PII is not logged: we only record method, path, and a sanitised message.
   const requestId = (req.headers['x-request-id'] as string | undefined) ?? undefined
+
+  // Determine if we are in a production environment
+  const isProduction = process.env.NODE_ENV === 'production'
+
+  // Sanitize any echoed PII from error details in production
+  const sanitizeDetails = (details: unknown) =>
+    isProduction ? sanitizePrivacyPayload(details) : details
 
   // Sanitize and convert express body-parser size limit errors
   if (err && typeof err === 'object' && 'status' in err && err.status === 413 && 'type' in err && (err as any).type === 'entity.too.large') {
@@ -156,7 +199,7 @@ export const errorHandler = (
       error: {
         code: err.code,
         message: err.message,
-        ...(err.details !== undefined && { details: err.details }),
+        ...(err.details !== undefined && { details: sanitizeDetails(err.details) }),
         ...(requestId && { requestId }),
       },
     }
@@ -166,7 +209,10 @@ export const errorHandler = (
   }
 
   // Unknown / unexpected errors – never leak internals to the client.
-  const message = err instanceof Error ? err.message : 'Internal server error'
+  // In production, always use a generic message. In dev, show the real error.
+  const message = isProduction
+    ? 'Internal server error'
+    : err instanceof Error ? err.message : 'Internal server error'
 
   console.error(
     JSON.stringify({
@@ -186,7 +232,7 @@ export const errorHandler = (
   const body: ErrorResponse = {
     error: {
       code: ErrorCode.INTERNAL_ERROR,
-      message: 'Internal server error',
+      message,
       ...(requestId && { requestId }),
     },
   }

@@ -1,32 +1,29 @@
-# Privacy Logging Guidelines
+# Privacy Logging
 
 ## Overview
-Disciplr is committed to protecting user data. To ensure that sensitive Personally Identifiable Information (PII) and credentials are never written to long-term storage via logs, we have implemented **Pino-based structured logging** with automatic redaction of sensitive fields.
 
-## Architecture
+`src/middleware/privacy-logger.ts` implements privacy-hardened HTTP request logging. It:
 
-### Structured JSON Logging with Pino
-The backend now uses **Pino** for efficient, structured JSON logging that is:
-- **Machine-readable**: Emits single-line JSON per log event for easy ingestion into log aggregators (Datadog, ELK, Grafana Loki, etc.)
-- **Secure by default**: Sensitive fields are automatically redacted via Pino's `redact` configuration
-- **Developer-friendly**: Pretty-printed output in development for readability
-- **Zero-overhead**: Minimal performance impact compared to console logging
+- Recursively redacts all PII from request bodies, query strings, and headers before emitting any log output.
+- Emits **exactly one structured JSON line per request** to `stdout` via `console.log`, on response finish.
+- Exports a standalone `redact()` utility that any module can call.
+- Never mutates the original request object.
 
-### Two-Layer Redaction Strategy
-1. **Pino built-in redaction** (`src/middleware/logger.ts`): Automatically redacts fields matching configured paths
-2. **Explicit redaction engine** (`src/middleware/privacy-logger.ts`): Additional `redact()` function for explicit control and backward compatibility
+## Log Schema
 
-### Correlation IDs
-All logs include correlation IDs (from `x-correlation-id` or `x-request-id` headers) for end-to-end request tracing:
-```json
-{
-  "correlationId": "550e8400-e29b-41d4-a716-446655440000",
-  "event": "http.request",
-  "durationMs": 45
-}
-```
+Every log line has exactly these top-level keys — no more, no less.
 
 ## Redaction Policy
+
+### Export Queue DLQ and Metrics Events
+Export job failure records and export queue structured events pass through the shared privacy sanitizer before they are persisted or emitted.
+The sanitizer replaces `userId`, `targetUserId`, Stellar account addresses, emails, `creator`, `successDestination`, and `failureDestination` with deterministic 8-character SHA-256 tokens.
+This keeps failed-job diagnostics and metrics correlation stable without exposing raw user identifiers to DLQ storage, logs, or downstream observability tooling.
+
+### Allowlist Mode (Fail Closed)
+The privacy logger runs in **allowlist mode** by default for request bodies, queries, and headers. This means **any field not explicitly allowlisted** is automatically redacted. This "fail closed" approach guarantees that newly added secrets (like webhook signing secrets, new API-key material, WebAuthn challenges, or JWTs) will never leak into the logs, even if they aren't manually added to the denylist.
+
+Safe operational fields (e.g. `requestId`, `status`, `method`, `host`, `user-agent`) are allowlisted and pass through. The explicit denylist continues to apply and takes precedence (i.e. a field on the denylist is always redacted).
 
 ### Automatic Redaction Paths
 The following paths are automatically redacted by Pino (value replaced with `***REDACTED***`):
@@ -74,184 +71,173 @@ The redaction engine is recursive and works safely across:
 
 ### Request Logger (`src/middleware/requestLogger.ts`)
 Emits structured JSON for every HTTP request:
+
 ```json
 {
-  "correlationId": "550e8400-e29b-41d4-a716-446655440000",
+  "timestamp": "2024-06-18T22:00:00.000Z",
+  "level": "info",
   "event": "http.request",
-  "req": {
-    "method": "POST",
-    "url": "/api/vaults",
-    "path": "/api/vaults",
-    "headers": { "authorization": "***REDACTED***" },
-    "body": { "email": "***REDACTED***", "amount": 1000 },
-    "userId": "user123",
-    "userRole": "admin"
-  },
-  "res": { "statusCode": 201 },
+  "service": "disciplr-backend",
+  "method": "POST",
+  "url": "/api/auth/login",
+  "status": 200,
   "durationMs": 45,
-  "msg": "POST /api/vaults 201 45ms"
+  "ip": "10.20.x.x",
+  "body": { "email": "[REDACTED]", "amount": 100 },
+  "query": null,
+  "headers": { "content-type": "application/json", "authorization": "[REDACTED]" }
 }
 ```
 
-**Log Level Selection**:
-- `error` (5xx status codes)
-- `warn` (4xx status codes)
-- `info` (2xx status codes)
-- `debug` (1xx status codes)
+The schema is snapshot-tested in `src/tests/privacy-logger.redaction.test.ts`.
 
-### Privacy Logger (`src/middleware/privacy-logger.ts`)
-Emits privacy-focused events with IP masking:
+## Redaction Marker
+
+Sensitive values are replaced with the string `"[REDACTED]"` (exported as `REDACTED`).
+
+## What Gets Redacted
+
+### Sensitive Field Names (case-insensitive key match)
+
+| Key | Why |
+|-----|-----|
+| `password`, `passwordHash` | Credentials |
+| `token`, `accessToken`, `refreshToken` | Auth tokens |
+| `apiKey`, `api_key` | API keys |
+| `secret`, `credential`, `credentials` | Generic secrets |
+| `authorization` | Auth header |
+| `x-api-key`, `x-auth-token` | Custom auth headers |
+| `cookie` | Session cookies |
+| `ssn` | Social Security Number |
+| `creditCard`, `credit_card`, `cvv`, `pin` | Payment data |
+| `email` | Email address |
+| `clientSecret` | OAuth secret |
+| `creator`, `successDestination`, `failureDestination` | Vault addresses |
+
+### PII Patterns (applied to string values regardless of key name)
+
+| Pattern | Example |
+|---------|---------|
+| Email address (`/[^@\s]+@[^@\s]+\.[^@\s]+/`) | `user@example.com` |
+| JWT (`/^[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+$/`) | `eyJ...` |
+
+## IP Masking
+
+| Input | Output |
+|-------|--------|
+| `192.168.1.1` (IPv4) | `192.168.x.x` |
+| `2001:0db8:85a3::7334` (IPv6) | `2001:0db8:85a3:xxxx:xxxx:xxxx:xxxx:xxxx` |
+| empty / unparseable | `unknown` |
+
+## Exports
+
+```typescript
+import { redact, maskIp, shouldRedact, privacyLogger, REDACTED } from './middleware/privacy-logger.js'
+```
+
+### `redact<T>(value: T, seen = new WeakSet(), allowlistMode = false): T`
+
+Deep-copies `value` and replaces every sensitive field value and every string matching a PII pattern with `REDACTED`. Input is never mutated. Handles circular references, `Date`, `RegExp`, `Buffer`, nested objects, and arrays.
+If `allowlistMode` is `true`, any object field not present in the allowlist is also redacted.
+
+```typescript
+redact({ password: 'secret', amount: 100 })
+// => { password: '[REDACTED]', amount: 100 }
+
+redact({ unknownField: 'val', requestId: '123' }, undefined, true)
+// => { unknownField: '[REDACTED]', requestId: '123' }
+
+redact({ nested: { email: 'a@b.com' } })
+// => { nested: { email: '[REDACTED]' } }
+```
+
+### `maskIp(ip: string): string`
+
+Returns a partially masked IP string (see table above).
+
+### `shouldRedact(key: string): boolean`
+
+Returns `true` if the key name (case-insensitive) is in the sensitive-field list.
+
+### `privacyLogger`
+
+Express middleware. Register it after body parsers and before routes:
+
+```typescript
+app.use(express.json())
+app.use(privacyLogger)
+app.use('/api', router)
+```
+
+## Error Path
+
+If log serialization fails for any reason, a minimal safe fallback is emitted and `next()` is still called:
+
 ```json
-{
-  "correlationId": "550e8400-e29b-41d4-a716-446655440000",
-  "event": "privacy.request_logged",
-  "ip": {
-    "original": "192.168.1.1",
-    "masked": "192.168.x.x"
-  },
-  "request": {
-    "method": "POST",
-    "url": "/api/test",
-    "headers": { "authorization": "***REDACTED***" },
-    "body": { "email": "***REDACTED***" }
-  },
-  "timestamp": "2025-06-02T14:32:10.000Z",
-  "msg": "Privacy-logged: POST /api/test"
-}
+{ "level": "error", "event": "privacy-logger.serialization-failure", "timestamp": "..." }
 ```
 
-**IP Masking**:
-- IPv4: `192.168.1.1` → `192.168.x.x` (mask last 2 octets)
-- IPv6: `2001:0db8:85a3::` → `2001:0db8:85a3:xxxx:xxxx:xxxx:xxxx:xxxx` (mask last 5 groups)
+No request data is included in the fallback.
 
-## Configuration
+## Privacy Endpoint Security
 
-### Logger Setup (`src/middleware/logger.ts`)
-```typescript
-export const logger = createLogger()
-```
+The `GET /api/privacy/export` and `DELETE /api/privacy/account` endpoints implement:
 
-**Environment Variables**:
-- `NODE_ENV` — Enables pretty-printing in `development` mode
-- `LOG_LEVEL` — Set minimum log level (`debug`, `info`, `warn`, `error`; default: `info`)
-
-### In Development
-Logs are pretty-printed with colors and indentation for readability:
-```
- INFO  (disciplr-backend): POST /api/vaults 201 45ms
-    req: {
-      "method": "POST",
-      "url": "/api/vaults"
-    }
-```
-
-### In Production
-Logs are emitted as single-line JSON:
-```
-{"correlationId":"550e8400...","event":"http.request","req":{...},"res":{"statusCode":201},"durationMs":45}
-```
-
-## Integration with Log Aggregators
-
-### Example: Datadog
-```bash
-# Install Datadog agent on your infrastructure
-# Provide Datadog API key
-
-# Datadog will automatically ingest JSON logs and parse fields:
-service: disciplr-backend
-correlationId: 550e8400-e29b-41d4-a716-446655440000
-event: http.request
-req.method: POST
-```
-
-### Example: Grafana Loki
-Configure Promtail to scrape and parse JSON:
-```yaml
-scrape_configs:
-  - job_name: disciplr-backend
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: disciplr-backend
-    relabel_configs:
-      - source_labels: [__address__]
-        target_label: __param_target
-```
-
-### Example: ELK Stack
-Logstash will parse JSON automatically:
-```json
-{
-  "correlationId": "550e8400-e29b-41d4-a716-446655440000",
-  "event": "http.request",
-  "req.method": "POST"
-}
-```
-
-## Adding New Redactions
-
-### Option 1: Add to Pino Redact Paths (Automatic)
-Edit `src/middleware/logger.ts` and add the path to the `redact.paths` array:
-```typescript
-redact: {
-  paths: [
-    'req.body.newSensitiveField',  // Add here
-    // ...existing paths
-  ]
-}
-```
-
-### Option 2: Add to Explicit Redaction List (Backward Compat)
-Edit `src/middleware/privacy-logger.ts` and add the field key to `SENSITIVE_FIELDS`:
-```typescript
-const SENSITIVE_FIELDS = new Set([
-    'email',
-    'password',
-    'newSensitiveField',  // Add here
-    // ...existing fields
-])
-```
-
-## Accessing Logs in Downstream Handlers
-
-Request handlers can use the injected logger for consistent structured logging:
-```typescript
-import { Request, Response, NextFunction } from 'express'
-
-export const myHandler = (req: Request, res: Response, next: NextFunction) => {
-  const logger = (req as any).logger
-  const correlationId = (req as any).correlationId
-
-  logger.info({ event: 'my_event', data: {...} }, 'Processing request')
-  
-  res.json({ message: 'Success' })
-}
-```
-
-All logs from the same request will automatically share the correlation ID.
+- **Strict rate limiting** via `strictRateLimiter` (10 req/hour, configured in `src/middleware/rateLimiter.ts`)
+- **Creator ownership verification** — only the matching user or an admin may access/delete
+- **Enumeration-resistant responses** — generic 404 for both non-owned and non-existent creators
+- **Abuse monitoring** via `AbuseMonitor` (`src/services/abuse-monitor.ts`) — suspicious creator enumeration is recorded with `enumeration` category
+- **Audit logging** on erasure via `src/lib/audit-logs.ts` (action: `privacy.account_erasure`)
+- **Security metrics** surfaced through `GET /api/health/security` and `GET /api/admin/abuse/category-counts`
 
 ## Development vs Production
 
-Redaction runs in **all environments** (development, staging, production) to:
-- Prevent accidental ingestion of PII into development databases or logs
-- Ensure parity in testing across environments
-- Maintain security posture uniformly
+## Adding New Sensitive Fields
 
-Debugging should rely on non-sensitive identifiers:
-- User IDs: `user123` (visible)
-- Vault IDs: `vault456` (visible)
-- Transaction references: `tx789` (visible)
-- Email addresses: `***REDACTED***` (hidden)
-- API keys: `***REDACTED***` (hidden)
+Edit `SENSITIVE_KEYS` in `src/middleware/privacy-logger.ts`:
+
+```typescript
+const SENSITIVE_KEYS = new Set([
+  // ... existing keys ...
+  'myNewSensitiveField',
+])
+```
+
+Update the snapshot after changing the set:
+
+```bash
+npx jest src/tests/privacy-logger.redaction.test.ts --updateSnapshot
+```
 
 ## Testing
 
-Run privacy logger tests to verify redaction coverage:
 ```bash
+# Run the hardened redaction test suite
+npx jest src/tests/privacy-logger.redaction.test.ts
+
+# Update snapshot after intentional schema changes
+npx jest src/tests/privacy-logger.redaction.test.ts --updateSnapshot
+
 npm test -- src/tests/privacy-logger.test.ts
+npm test -- src/tests/exportQueue.pii.test.ts
 ```
+
+Test coverage includes:
+
+- Primitive passthrough
+- Email and JWT value-pattern redaction
+- All sensitive key names (case-insensitive)
+- Nested object and array redaction
+- Deeply nested PII
+- Circular reference protection
+- No input mutation
+- `Date`, `RegExp`, `Buffer` serialization
+- `maskIp` IPv4 / IPv6 / unknown
+- Middleware schema (exact top-level keys)
+- `null` body and `null` query
+- Header redaction (`authorization`, `x-api-key`, `x-auth-token`, `cookie`)
+- Serialization-failure fallback
+- Snapshot of a representative request
 
 Coverage includes:
 - ✅ Sensitive field redaction at all nesting levels
@@ -261,10 +247,23 @@ Coverage includes:
 - ✅ Pino JSON structure verification
 - ✅ PII leakage regression tests
 
+### Property-Based Invariants
+
+`src/tests/privacy-logger.test.ts` also uses `fast-check` with at least 100
+generated cases per property to enforce:
+
+- Sensitive keys are redacted at every nesting depth.
+- Safe objects without sensitive keys or PII-pattern values remain deep-equal.
+- `redact()` never mutates its input.
+- Email-shaped and JWT-shaped values are redacted regardless of key name.
+- Array elements are recursively redacted into a new array.
+- Structured privacy log events contain only the documented key set.
+- IPv4 masks keep the first two octets; IPv6 masks keep the first three groups.
+
 ## Compliance
 
 This logging architecture supports compliance with:
-- **GDPR** — Redaction prevents PII leakage to log storage
+- **GDPR** — Redaction prevents PII leakage to log storage; right to access and erasure endpoints are rate-limited and ownership-gated
 - **HIPAA** — Sensitive fields are never stored in unencrypted logs
 - **SOC 2** — Structured logging enables audit trail generation
 - **PCI DSS** — Passwords, tokens, and API keys are redacted

@@ -1,56 +1,50 @@
+import { createHash } from 'node:crypto'
 import { NotificationService } from '../services/notifications/factory.js'
 import { processJob as processExportJob } from '../services/exportQueue.js'
-import type { JobHandler, JobType } from './types.js'
-import { markVaultExpiries } from '../services/vaultExpiry.service.js'
-import { cleanupExpiredSessions } from '../services/session.js'
+import type { EnqueueOptions, JobHandler, JobPayloadByType, JobType } from './types.js'
+import { TransactionETLService } from '../services/transactionETL.js'
+import { MilestoneEmbeddingSource, ReindexCursorStore } from '../services/evidenceReindex.js'
+import { EmbeddingProvider } from '../services/embeddingProvider.js'
 import { buildSlashOnMissPayload } from '../services/soroban.js'
+import {
+  markVaultExpiries,
+  sendMilestoneReminders,
+  sendMilestoneDigestReminders,
+  processDeferredReminders,
+} from '../services/vaultExpiry.service.js'
+import { cleanupExpiredSessions } from '../services/session.js'
+import { purgeSoftDeletedVaults } from '../services/retention.js'
+import { createAuditLog } from '../lib/audit-logs.js'
+import { relayOutboxBatch } from '../services/outboxRelay.js'
+import { runReindexBatches } from '../services/evidenceReindex.js'
+import { renderOrgAnalyticsSnapshot } from '../services/analytics.service.js'
+import {
+  saveOrgReport,
+  getAllOrgIds,
+  checkAndIncrementReportQuota,
+} from '../services/analyticsReports.js'
+import { resolveS3Config, uploadToS3 } from '../services/exportS3.js'
+import db from '../db/index.js'
 
-type JobHandlerRegistry = {
-  [K in JobType]: JobHandler<K>
+export interface EmbeddingReindexDependencies {
+  source: MilestoneEmbeddingSource
+  cursorStore: ReindexCursorStore
+  embeddingProvider: EmbeddingProvider
 }
 
-const sleep = async (ms: number): Promise<void> => {
-  await new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
-
-const logJob = (type: JobType, message: string): void => {
-  console.log(`[jobs:${type}] ${message}`)
-}
-
-/**
- * Perform a best-effort startup probe to detect a broken NotificationService
- * early — before any job is dequeued — so misconfiguration is surfaced at
- * startup rather than silently exhausting maxAttempts per job at runtime.
- *
- * Fix #1290: the original code had no such check. A static/instance method
- * mismatch in NotificationService.send caused every notification job to throw
- * immediately, burning through retries and landing in the dead-letter queue.
- */
-function validateNotificationService(service: NotificationService): void {
-  if (typeof service.send !== 'function') {
-    throw new Error(
-      '[jobs] NotificationService.send is not a function — ' +
-        'check for a static/instance method mismatch in the NotificationService class. ' +
-        'All notification.send jobs will fail until this is resolved.',
-    )
-  }
-}
+export type JobEnqueuer = <T extends JobType>(
+  type: T,
+  payload: JobPayloadByType[T],
+  options?: EnqueueOptions,
+) => void
 
 export const createDefaultJobHandlers = (
   notificationService: NotificationService,
+  embeddingReindex: EmbeddingReindexDependencies,
+  enqueueJob?: JobEnqueuer,
 ): JobHandlerRegistry => {
-  // Fail fast at handler-registration time rather than per-job at dequeue time.
-  validateNotificationService(notificationService)
-
-  return {
+  const jobHandlers: JobHandlerRegistry = {
     'notification.send': async (payload, context) => {
-      // Fix #1290: wrap send in its own try/catch so that a provider-level
-      // failure produces a structured log entry and a meaningful error message
-      // rather than an unhandled rejection that only surfaces via queue
-      // machinery.  The error is still re-thrown so the queue's retry /
-      // dead-letter logic continues to operate normally.
       try {
         await notificationService.send(payload.recipient, payload.subject, payload.body)
         logJob('notification.send', `executed job_id=${context.jobId} attempt=${context.attempt}`)
@@ -72,7 +66,8 @@ export const createDefaultJobHandlers = (
     },
     'deadline.check': async (payload, context) => {
       await sleep(30)
-      const expiredCount = await markVaultExpiries()
+      const batchSize = payload.batchSize ?? 100
+      const expiredCount = await markVaultExpiries({ limit: batchSize })
       const target = payload.vaultId ?? 'all-active-vaults'
       const deadline = payload.deadlineIso ?? 'not-provided'
       logJob(
@@ -120,4 +115,82 @@ export const createDefaultJobHandlers = (
       )
     },
   }
+
+  if (enqueueJob) {
+    jobHandlers['milestone.reminders'] = async (payload, context) => {
+      const remindersSent = await sendMilestoneReminders({
+        leadTimesMs: payload.leadTimesMs,
+        limit: payload.limit,
+      })
+      logJob(
+        'milestone.reminders',
+        `sent ${remindersSent} reminders attempt=${context.attempt}`,
+      )
+    }
+
+    jobHandlers['milestone.reminders.digest'] = async (payload, context) => {
+      const result = await sendMilestoneDigestReminders({
+        leadTimesMs: payload.leadTimesMs,
+        limit: payload.limit,
+      })
+      logJob(
+        'milestone.reminders.digest',
+        `sent=${result.digestsSent} deferred=${result.digestsDeferred} milestones=${result.totalMilestones} attempt=${context.attempt}`,
+      )
+    }
+
+    jobHandlers['milestone.reminders.deferred'] = async (payload, context) => {
+      const delivered = await processDeferredReminders({
+        batchSize: payload.batchSize,
+      })
+      logJob(
+        'milestone.reminders.deferred',
+        `delivered=${delivered} attempt=${context.attempt}`,
+      )
+    }
+
+    jobHandlers['analytics.report.generate'] = async (payload, context) => {
+      const s3Config = resolveS3Config()
+      const orgIds = payload.orgIds ?? (await getAllOrgIds())
+      let generated = 0
+      let skipped = 0
+      for (const orgId of orgIds) {
+        if (!(await checkAndIncrementReportQuota(orgId))) {
+          skipped += 1
+          continue
+        }
+        const report = await renderOrgAnalyticsSnapshot(orgId)
+        const key = `analytics/${orgId}/${Date.now()}.json`
+        await uploadToS3(s3Config, key, JSON.stringify(report))
+        await saveOrgReport(orgId, key)
+        generated += 1
+      }
+      logJob(
+        'analytics.report.generate',
+        `generated=${generated} skipped=${skipped} attempt=${context.attempt}`,
+      )
+    }
+
+    jobHandlers['retention.purge'] = async (payload, context) => {
+      const purged = await purgeSoftDeletedVaults({ batchSize: payload.batchSize })
+      logJob('retention.purge', `purged=${purged} attempt=${context.attempt}`)
+    }
+
+    jobHandlers['outbox.relay'] = async (payload, context) => {
+      const relayed = await relayOutboxBatch(payload.batchSize)
+      logJob('outbox.relay', `relayed=${relayed} attempt=${context.attempt}`)
+    }
+
+    jobHandlers['embeddings.reindex'] = async (payload, context) => {
+      const batches = await runReindexBatches(embeddingReindex, payload)
+      logJob('embeddings.reindex', `batches=${batches} attempt=${context.attempt}`)
+    }
+
+    jobHandlers['saved-search.evaluate'] = async (payload, context) => {
+      // Placeholder for saved-search evaluation
+      logJob('saved-search.evaluate', `evaluated=${payload.searchId} attempt=${context.attempt}`)
+    }
+  }
+
+  return jobHandlers as JobHandlerRegistry
 }

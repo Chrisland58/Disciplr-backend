@@ -5,7 +5,9 @@ import { registerSchema, loginSchema, refreshSchema } from '../lib/validation.js
 import { createAuditLog } from '../lib/audit-logs.js'
 import { authenticate } from '../middleware/auth.js'
 import { revokeSession, revokeAllUserSessions } from '../services/session.js'
+import { requireStepUp } from '../middleware/stepUp.js'
 import { requireJson } from '../middleware/requireJson.js'
+import { AUTH_JSON_MAX_BYTES } from '../middleware/requestBodyLimits.js'
 import { AppError } from '../middleware/errorHandler.js'
 import { prisma } from '../lib/prisma.js'
 import { UserRole } from '../types/user.js'
@@ -157,9 +159,36 @@ authRouter.post('/logout-all', authenticate, async (req: Request, res: Response,
   res.json({ message: "Successfully logged out from all devices" });
 });
 
-authRouter.post('/users/:id/role', requireJson, authenticate, async (req, res, next) => {
-  if (req.user?.role !== UserRole.ADMIN) {
-    return next(AppError.forbidden('Only admin users can change roles'))
+authRouter.post('/webauthn/challenge', authenticate, async (req, res, next) => {
+  if (!req.user?.userId) {
+    return next(AppError.unauthorized('Unauthorized'))
+  }
+
+  const challenge = await AuthService.issueStepUpChallenge(req.user.userId)
+  res.status(200).json(challenge)
+})
+
+authRouter.post('/webauthn/assert', authenticate, async (req, res, next) => {
+  const { nonce, credentialId, publicKey } = req.body as { nonce?: string; credentialId?: string; publicKey?: string }
+  if (!req.user?.userId || !nonce || !credentialId || !publicKey) {
+    return next(AppError.badRequest('Missing WebAuthn assertion data'))
+  }
+
+  const recorded = await AuthService.recordStepUpAssertion(nonce, req.user.userId)
+  if (!recorded) {
+    return next(AppError.unauthorized('Invalid or expired step-up assertion'))
+  }
+
+  await AuthService.registerWebAuthnCredential(req.user.userId, credentialId, publicKey)
+  res.status(200).json({ success: true })
+})
+
+authRouter.post('/users/:id/role', requireJson, authenticate, requireStepUp(), async (req, res, next) => {
+  if (!req.user) {
+    return next(AppError.unauthorized('Unauthorized'))
+  }
+  if (req.user.role !== UserRole.ADMIN) {
+    return next(AppError.forbidden('Forbidden: Only admin users can change roles'))
   }
 
   const paramsResult = userIdParamSchema.safeParse(req.params)
